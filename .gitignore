@@ -2,3 +2,12 @@
 __pycache__/
 *.pyc
 .claude/settings.local.json
+
+# local outputs (keep repo small)
+*.pt
+*.bin
+*.safetensors
+checkpoints/
+out/
+wandb/
+.venv/
