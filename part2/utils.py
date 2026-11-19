@@ -4,6 +4,7 @@ import os
 import re
 import pickle
 import random
+import time
 from tqdm import tqdm
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,7 @@ from typing import List, Any
 import torch
 
 DB_PATH = 'data/flight_database.db'
+QUERY_TIMEOUT_SECS = 120
 
 def compute_metrics(gt_path: str, model_path: str, gt_query_records: str = None, model_query_records: str = None):
     '''
@@ -108,6 +110,8 @@ def compute_records(processed_qs: List[str]):
         for future in futures:
             if not future.done():
                 future.cancel()
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
             
     recs = []
     error_msgs = []
@@ -123,7 +127,9 @@ def compute_records(processed_qs: List[str]):
     return recs, error_msgs
 
 def compute_record(query_id, query):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
+    deadline = time.monotonic() + QUERY_TIMEOUT_SECS
+    conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
     cursor = conn.cursor()
 
     try:

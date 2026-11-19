@@ -9,6 +9,7 @@ import torch
 from tqdm.auto import tqdm
 import evaluate
 import random
+import re
 import argparse
 from nltk.corpus import wordnet
 from nltk import word_tokenize
@@ -44,7 +45,28 @@ def custom_transform(example):
 
     # You should update example["text"] using your transformation
 
-    raise NotImplementedError
+    KEYBOARD_NEIGHBORS = {
+        "q": "wa", "w": "qeas", "e": "wrsd", "r": "etdf", "t": "ryfg",
+        "y": "tugh", "u": "yihj", "i": "uojk", "o": "ipkl", "p": "ol",
+        "a": "qwsz", "s": "awedxz", "d": "serfcx", "f": "drtgvc",
+        "g": "ftyhbv", "h": "gyujnb", "j": "huikmn", "k": "jiolm",
+        "l": "kop", "z": "asx", "x": "zsdc", "c": "xdfv", "v": "cfgb",
+        "b": "vghn", "n": "bhjm", "m": "njk",
+    }
+    # Use the same typos for a review in both training and evaluation.
+    rng = random.Random(f"0:{example['text']}")
+
+    def add_typo(match):
+        word = match.group(0)
+        if rng.random() >= 0.4:
+            return word
+        index = rng.randrange(1, len(word) - 1)
+        replacement = rng.choice(KEYBOARD_NEIGHBORS[word[index].lower()])
+        if word[index].isupper():
+            replacement = replacement.upper()
+        return word[:index] + replacement + word[index + 1:]
+
+    example["text"] = re.sub(r"\b[A-Za-z]{4,}\b", add_typo, example["text"])
 
     ##### YOUR CODE ENDS HERE ######
 

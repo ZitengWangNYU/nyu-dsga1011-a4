@@ -6,12 +6,15 @@ import transformers
 from transformers import T5ForConditionalGeneration, T5Config
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 import wandb
+from load_data import MODEL_NAME, get_tokenizer
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 def setup_wandb(args):
     # Implement this if you wish to use wandb in your experiments
-    pass
+    return wandb.init(
+        project='nlp-a4-text-to-sql', name=args.experiment_name, config=vars(args)
+    )
 
 def initialize_model(args):
     '''
@@ -20,7 +23,16 @@ def initialize_model(args):
     or training a T5 model initialized with the 'google-t5/t5-small' config
     from scratch.
     '''
-    pass
+    if args.finetune:
+        model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
+    else:
+        model = T5ForConditionalGeneration(T5Config.from_pretrained(MODEL_NAME))
+    tokenizer = get_tokenizer()
+    # The pretrained vocabulary has spare rows for the added SQL tokens.
+    if len(tokenizer) > model.config.vocab_size:
+        model.resize_token_embeddings(len(tokenizer))
+    model.config.decoder_start_token_id = tokenizer.pad_token_id
+    return model.to(DEVICE)
 
 def mkdir(dirpath):
     if not os.path.exists(dirpath):
@@ -31,11 +43,21 @@ def mkdir(dirpath):
 
 def save_model(checkpoint_dir, model, best):
     # Save model checkpoint to be able to load the model later
-    pass
+    checkpoint_path = os.path.join(checkpoint_dir, 'best' if best else 'last')
+    mkdir(checkpoint_path)
+    model.save_pretrained(checkpoint_path)
+    get_tokenizer().save_pretrained(checkpoint_path)
 
 def load_model_from_checkpoint(args, best):
     # Load model from a checkpoint
-    pass
+    model_type = 'ft' if args.finetune else 'scr'
+    checkpoint_path = os.path.join(
+        'checkpoints', f'{model_type}_experiments', args.experiment_name,
+        'best' if best else 'last',
+    )
+    if not os.path.isdir(checkpoint_path):
+        raise FileNotFoundError(f'Model checkpoint does not exist: {checkpoint_path}')
+    return T5ForConditionalGeneration.from_pretrained(checkpoint_path).to(DEVICE)
 
 def initialize_optimizer_and_scheduler(args, model, epoch_length):
     optimizer = initialize_optimizer(args, model)

@@ -10,7 +10,7 @@ import wandb
 from t5_utils import initialize_model, initialize_optimizer_and_scheduler, save_model, load_model_from_checkpoint, setup_wandb
 from transformers import GenerationConfig
 from load_data import load_t5_data
-from utils import compute_metrics, save_queries_and_records
+from utils import compute_metrics, save_queries_and_records, set_random_seeds
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 PAD_IDX = 0
@@ -47,6 +47,10 @@ def get_args():
     # Data hyperparameters
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--test_batch_size', type=int, default=16)
+    parser.add_argument('--num_beams', type=int, default=1,
+                        help='beam search width; 1 uses greedy decoding')
+    parser.add_argument('--predict_test', action='store_true',
+                        help='generate test outputs for the final selected model')
 
     args = parser.parse_args()
     return args
@@ -92,7 +96,7 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
         if epochs_since_improvement == 0:
             save_model(checkpoint_dir, model, best=True)
 
-        if epochs_since_improvement >= args.patience_epochs:
+        if args.patience_epochs > 0 and epochs_since_improvement >= args.patience_epochs:
             break
 
 def train_epoch(args, model, train_loader, optimizer, scheduler):
@@ -128,6 +132,19 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
 
     return total_loss / total_tokens
         
+def generate_queries(model, tokenizer, encoder_input, encoder_mask, initial_decoder_input, num_beams=1):
+    generated = model.generate(
+        input_ids=encoder_input,
+        attention_mask=encoder_mask,
+        decoder_input_ids=initial_decoder_input,
+        max_new_tokens=512,
+        num_beams=num_beams,
+        do_sample=False,
+    )
+    return tokenizer.batch_decode(
+        generated.cpu(), skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )
+
 def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_path, model_record_path):
     '''
     You must implement the evaluation loop to be using during training. We recommend keeping track
@@ -138,20 +155,67 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
     should both provide good results. If you find that this component of evaluation takes too long with your compute,
     we found the cross-entropy loss (in the evaluation set) to be well (albeit imperfectly) correlated with F1 performance.
     '''
-    # TODO
     model.eval()
-    return 0, 0, 0, 0, 0
+    model_device = next(model.parameters()).device
+    tokenizer = dev_loader.dataset.tokenizer
+    total_loss = 0.0
+    total_tokens = 0
+    queries = []
+    criterion = nn.CrossEntropyLoss(reduction='sum', ignore_index=PAD_IDX)
+    with torch.no_grad():
+        for batch in tqdm(dev_loader, desc='Development'):
+            encoder_input, encoder_mask, decoder_input, targets, initial_input = (
+                tensor.to(model_device) for tensor in batch
+            )
+            logits = model(
+                input_ids=encoder_input, attention_mask=encoder_mask,
+                decoder_input_ids=decoder_input,
+            ).logits
+            total_loss += criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1)).item()
+            total_tokens += targets.ne(PAD_IDX).sum().item()
+            queries.extend(generate_queries(
+                model, tokenizer, encoder_input, encoder_mask, initial_input, num_beams=args.num_beams
+            ))
+
+    if total_tokens == 0:
+        raise ValueError('Development loader contains no target tokens')
+    for path in (model_sql_path, model_record_path):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    save_queries_and_records(queries, model_sql_path, model_record_path)
+    sql_em, record_em, record_f1, error_messages = compute_metrics(
+        gt_sql_pth, model_sql_path,
+        gt_record_path if gt_record_path and os.path.isfile(gt_record_path) else None,
+        model_record_path,
+    )
+    error_rate = sum(bool(error) or not query.strip() for query, error in zip(queries, error_messages)) / len(queries)
+    return total_loss / total_tokens, record_f1, record_em, sql_em, error_rate
         
 def test_inference(args, model, test_loader, model_sql_path, model_record_path):
     '''
     You must implement inference to compute your model's generated SQL queries and its associated 
     database records. Implementation should be very similar to eval_epoch.
     '''
-    pass
+    model.eval()
+    model_device = next(model.parameters()).device
+    tokenizer = test_loader.dataset.tokenizer
+    queries = []
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc='Test'):
+            encoder_input, encoder_mask, initial_input = (
+                tensor.to(model_device) for tensor in batch
+            )
+            queries.extend(generate_queries(
+                model, tokenizer, encoder_input, encoder_mask, initial_input, num_beams=args.num_beams
+            ))
+    for path in (model_sql_path, model_record_path):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    save_queries_and_records(queries, model_sql_path, model_record_path)
+    return queries
 
 def main():
     # Get key arguments
     args = get_args()
+    set_random_seeds(42)
     if args.use_wandb:
         # Recommended: Using wandb (or tensorboard) for result logging can make experimentation easier
         setup_wandb(args)
@@ -182,9 +246,10 @@ def main():
     print(f"Dev set results: {dev_error_rate*100:.2f}% of the generated outputs led to SQL errors")
 
     # Test set
-    model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_test.sql')
-    model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_test.pkl')
-    test_inference(args, model, test_loader, model_sql_path, model_record_path)
+    if args.predict_test:
+        model_sql_path = os.path.join(f'results/t5_{model_type}_{experiment_name}_test.sql')
+        model_record_path = os.path.join(f'records/t5_{model_type}_{experiment_name}_test.pkl')
+        test_inference(args, model, test_loader, model_sql_path, model_record_path)
 
 if __name__ == "__main__":
     main()
